@@ -120,7 +120,10 @@ export async function scrapeCourse() {
           const url = page.url();
           log("  🔗", url);
 
+          await resetLessonViewport(page);
           const notationPdf = await downloadLessonNotationPdf(page, outDir);
+
+          await resetLessonViewport(page);
           const tabs = await getTopTabs(page);
 
           const units = [];
@@ -129,6 +132,7 @@ export async function scrapeCourse() {
 
             await openTab(page, tab.index);
             await waitForPanelStable(page, tab.label || tab.heading || "tab");
+            await resetLessonViewport(page);
 
             const panel = await extractCurrentPanel(
               page,
@@ -561,14 +565,83 @@ async function getTopTabs(page) {
   });
 }
 
+async function exitFullscreenIfNeeded(page) {
+  const isFs = await page
+    .evaluate(() => !!document.fullscreenElement)
+    .catch(() => false);
+
+  if (!isFs) return;
+
+  await page
+    .evaluate(async () => {
+      if (document.fullscreenElement && document.exitFullscreen) {
+        try {
+          await document.exitFullscreen();
+        } catch {}
+      }
+    })
+    .catch(() => {});
+
+  await page.waitForTimeout(300);
+}
+
+async function resetLessonViewport(page) {
+  await page.keyboard.press("Escape").catch(() => {});
+  await exitFullscreenIfNeeded(page);
+
+  await page
+    .evaluate(() => {
+      try {
+        document.activeElement?.blur?.();
+      } catch {}
+
+      try {
+        window.scrollTo(0, 0);
+      } catch {}
+
+      try {
+        if (document.scrollingElement) document.scrollingElement.scrollTop = 0;
+        if (document.documentElement) document.documentElement.scrollTop = 0;
+        if (document.body) document.body.scrollTop = 0;
+      } catch {}
+    })
+    .catch(() => {});
+
+  await page.waitForTimeout(350);
+}
+
 async function openTab(page, index) {
-  const tab = page.locator('[role="tab"]').nth(index);
-  await tab.click({ force: true }).catch(() => {});
-  await page.waitForTimeout(1200);
+  await resetLessonViewport(page);
+
+  const clicked = await page
+    .evaluate(
+      ({ index }) => {
+        const tabs = Array.from(document.querySelectorAll('[role="tab"]'));
+        const tab = tabs[index];
+        if (!tab) return false;
+
+        tab.scrollIntoView({ block: "center", inline: "center" });
+        tab.click();
+        return true;
+      },
+      { index },
+    )
+    .catch(() => false);
+
+  if (!clicked) {
+    const tab = page.locator('[role="tab"]').nth(index);
+    await tab.scrollIntoViewIfNeeded().catch(() => {});
+    await tab.click().catch(() => {});
+  }
+
+  await page.waitForTimeout(900);
+  await exitFullscreenIfNeeded(page);
+  await page.keyboard.press("Escape").catch(() => {});
 }
 
 async function waitForPanelStable(page, expectedText) {
   const norm = normalizeText(expectedText || "");
+
   await page
     .waitForFunction(
       ({ norm }) => {
@@ -576,13 +649,16 @@ async function waitForPanelStable(page, expectedText) {
           .replace(/\s+/g, " ")
           .trim()
           .toLowerCase();
+
         return !norm || txt.includes(norm);
       },
       { norm },
       { timeout: 12000 },
     )
     .catch(() => {});
-  await page.waitForTimeout(1200);
+
+  await exitFullscreenIfNeeded(page);
+  await page.waitForTimeout(900);
 }
 
 async function extractCurrentPanel(page, expectedHeading) {
@@ -803,31 +879,58 @@ async function downloadLessonNotationPdf(page, outDir) {
   const existing = await findExistingNotationPdf(outDir);
   if (existing) return path.basename(existing);
 
+  await resetLessonViewport(page);
+
+  const tabs = await getTopTabs(page).catch(() => []);
+  const lessonTab = tabs.find(
+    (t) => normalizeText(t.label || t.heading || "") === "lesson",
+  );
+
+  if (lessonTab) {
+    await openTab(page, lessonTab.index).catch(() => {});
+    await waitForPanelStable(
+      page,
+      lessonTab.label || lessonTab.heading || "Lesson",
+    );
+    await resetLessonViewport(page);
+  }
+
   const menuOpened = await openLessonOptionsMenu(page);
   if (!menuOpened) return null;
 
   const item = page.getByText("Download notation", { exact: true }).first();
   const visible = await item.isVisible().catch(() => false);
-  if (!visible) return null;
+  if (!visible) {
+    await page.keyboard.press("Escape").catch(() => {});
+    return null;
+  }
 
-  const result = await Promise.all([
-    page.waitForEvent("download", { timeout: 12000 }).catch(() => null),
-    item.click({ force: true }).catch(() => null),
-  ]);
+  try {
+    const downloadPromise = page.waitForEvent("download", { timeout: 20000 });
+    await item.click().catch(() => {});
+    const download = await downloadPromise.catch(() => null);
 
-  const download = result[0];
-  if (!download) return null;
+    if (!download) {
+      await page.keyboard.press("Escape").catch(() => {});
+      return null;
+    }
 
-  const suggested = sanitizeFilename(
-    download.suggestedFilename() || "notation.pdf",
-  );
-  const finalName = suggested.toLowerCase().endsWith(".pdf")
-    ? suggested
-    : `${suggested}.pdf`;
-  const finalPath = path.join(outDir, finalName);
-  await download.saveAs(finalPath);
-  await page.keyboard.press("Escape").catch(() => {});
-  return finalName;
+    const suggested = sanitizeFilename(
+      download.suggestedFilename() || "notation.pdf",
+    );
+    const finalName = suggested.toLowerCase().endsWith(".pdf")
+      ? suggested
+      : `${suggested}.pdf`;
+
+    const finalPath = path.join(outDir, finalName);
+    await download.saveAs(finalPath);
+
+    await page.keyboard.press("Escape").catch(() => {});
+    return finalName;
+  } catch {
+    await page.keyboard.press("Escape").catch(() => {});
+    return null;
+  }
 }
 
 async function findExistingNotationPdf(dir) {
@@ -839,15 +942,20 @@ async function findExistingNotationPdf(dir) {
 }
 
 async function openLessonOptionsMenu(page) {
+  await resetLessonViewport(page);
+
   const existing = await page
     .getByText("Download notation", { exact: true })
     .first()
     .isVisible()
     .catch(() => false);
+
   if (existing) return true;
 
   const button = await findTopRightMenuButton(page);
   if (!button) return false;
+
+  await button.scrollIntoViewIfNeeded().catch(() => {});
   await button.click().catch(() => {});
   await page.waitForTimeout(700);
 
@@ -860,8 +968,9 @@ async function openLessonOptionsMenu(page) {
 
 async function findTopRightMenuButton(page) {
   const handles = await page
-    .locator('button, [role="button"]')
+    .locator("main button, main [role='button']")
     .elementHandles();
+
   const viewport = page.viewportSize() || { width: 1600, height: 900 };
   let best = null;
 
@@ -869,15 +978,56 @@ async function findTopRightMenuButton(page) {
     try {
       const box = await handle.boundingBox();
       if (!box) continue;
+
+      const text = normalizeText(
+        (await handle.innerText().catch(() => "")) || "",
+      );
+      const aria = normalizeText(
+        (await handle.getAttribute("aria-label").catch(() => "")) || "",
+      );
+      const title = normalizeText(
+        (await handle.getAttribute("title").catch(() => "")) || "",
+      );
+
+      const isPlayerControl =
+        text === "play" ||
+        aria.includes("play") ||
+        aria.includes("pause") ||
+        aria.includes("mute") ||
+        aria.includes("fullscreen") ||
+        aria.includes("seek") ||
+        title.includes("play") ||
+        title.includes("fullscreen");
+
+      if (isPlayerControl) continue;
+
       const inZone =
-        box.x >= viewport.width * 0.68 && box.y <= viewport.height * 0.3;
+        box.x >= viewport.width * 0.62 && box.y <= viewport.height * 0.35;
+
       const sizeOk =
-        box.width >= 20 &&
-        box.height >= 20 &&
+        box.width >= 18 &&
+        box.height >= 18 &&
         box.width <= 90 &&
         box.height <= 90;
+
       if (!inZone || !sizeOk) continue;
-      if (!best || box.x > best.x) best = { handle, x: box.x };
+
+      const explicitMenu =
+        text === "..." ||
+        aria.includes("menu") ||
+        aria.includes("more") ||
+        title.includes("menu") ||
+        title.includes("more");
+
+      const score =
+        (explicitMenu ? 10000 : 0) +
+        box.x -
+        box.y -
+        Math.abs(box.width - box.height);
+
+      if (!best || score > best.score) {
+        best = { handle, score };
+      }
     } catch {}
   }
 
