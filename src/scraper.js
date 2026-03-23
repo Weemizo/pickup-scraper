@@ -130,14 +130,18 @@ export async function scrapeCourse() {
           for (const tab of tabs) {
             if (tab.disabled) continue;
 
-            await openTab(page, tab.index);
-            await waitForPanelStable(page, tab.label || tab.heading || "tab");
-            await resetLessonViewport(page);
+            if (!tab.synthetic) {
+              await openTab(page, tab.index);
+              await waitForPanelStable(page, tab.label || tab.heading || "tab");
+            } else {
+              await page.waitForTimeout(600);
+            }
 
             const panel = await extractCurrentPanel(
               page,
               tab.label || tab.heading || "Lesson",
             );
+
             const notationShots = await captureNotationScreenshots(
               page,
               outDir,
@@ -523,15 +527,36 @@ async function clickLessonInGrade(
 async function validateLessonView(page, lesson) {
   return page.evaluate(({ day, title }) => {
     const norm = (s = "") => s.replace(/\s+/g, " ").trim().toLowerCase();
-    const mainText = norm(document.querySelector("main")?.innerText || "");
+
+    const main = document.querySelector("main");
+    const mainText = norm(main?.innerText || "");
     const url = location.href;
+
     const urlOk = /\/lesson\/[^/]+/.test(url);
     const hasDay = mainText.includes(norm(day));
     const hasTitle = mainText.includes(norm(title));
-    const hasUi =
-      !!document.querySelector('[role="tab"]') ||
+
+    const hasClassicTabs = !!document.querySelector('[role="tab"]');
+    const hasVideoLikeUi =
       !!document.querySelector("main video") ||
-      !!document.querySelector("main iframe");
+      !!document.querySelector("main iframe") ||
+      !!document.querySelector("main mux-player") ||
+      !!document.querySelector('main [src*=".m3u8"]');
+
+    const hasLessonActions =
+      !!Array.from(document.querySelectorAll("main button, main [role='button']")).find((el) => {
+        const txt = norm(el.textContent || "");
+        const aria = norm(el.getAttribute("aria-label") || "");
+        return (
+          txt.includes("complete lesson") ||
+          aria.includes("complete lesson") ||
+          txt.includes("performances") ||
+          aria.includes("performances")
+        );
+      });
+
+    const hasUi = hasClassicTabs || hasVideoLikeUi || hasLessonActions;
+
     return {
       urlOk,
       hasDay,
@@ -543,26 +568,62 @@ async function validateLessonView(page, lesson) {
 }
 
 async function getTopTabs(page) {
-  return page.locator('[role="tab"]').evaluateAll((nodes) => {
+  const realTabs = await page.locator('[role="tab"]').evaluateAll((nodes) => {
     const clean = (s) => s?.replace(/\s+/g, " ").trim() || "";
     return nodes.map((tab, index) => {
       const texts = Array.from(
-        tab.querySelectorAll('[dir="auto"], h1, h2, h3, [role="heading"]'),
+        tab.querySelectorAll('[dir="auto"], h1, h2, h3, [role="heading"]')
       )
         .map((el) => clean(el.textContent))
         .filter(Boolean);
+
       return {
         index,
-        label:
-          clean(tab.getAttribute("aria-label")) ||
-          texts[0] ||
-          `tab-${index + 1}`,
+        label: clean(tab.getAttribute("aria-label")) || texts[0] || `tab-${index + 1}`,
         heading: texts[0] || null,
         subtitle: texts[1] || null,
         disabled: tab.getAttribute("aria-disabled") === "true",
+        synthetic: false,
       };
     });
   });
+
+  if (realTabs.length) return realTabs;
+
+  const synthetic = await page.evaluate(() => {
+    const main = document.querySelector("main");
+    if (!main) return [];
+
+    const hasStandaloneLesson =
+      !!main.querySelector("mux-player") ||
+      !!main.querySelector("video") ||
+      !!main.querySelector("iframe") ||
+      !!Array.from(main.querySelectorAll("button, [role='button']")).find((el) => {
+        const txt = (el.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+        const aria = (el.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim().toLowerCase();
+        return (
+          txt.includes("complete lesson") ||
+          aria.includes("complete lesson") ||
+          txt.includes("performances") ||
+          aria.includes("performances")
+        );
+      });
+
+    if (!hasStandaloneLesson) return [];
+
+    return [
+      {
+        index: -1,
+        label: "Lesson",
+        heading: "Lesson",
+        subtitle: null,
+        disabled: false,
+        synthetic: true,
+      },
+    ];
+  });
+
+  return synthetic;
 }
 
 async function exitFullscreenIfNeeded(page) {
@@ -662,41 +723,39 @@ async function waitForPanelStable(page, expectedText) {
 }
 
 async function extractCurrentPanel(page, expectedHeading) {
-  return page.evaluate(
-    ({ expectedHeading }) => {
-      const clean = (s) => s?.replace(/\s+/g, " ").trim() || "";
-      const visible = (el) => {
-        if (!el) return false;
-        const st = window.getComputedStyle(el);
-        const r = el.getBoundingClientRect();
-        return (
-          st.display !== "none" &&
-          st.visibility !== "hidden" &&
-          r.width > 40 &&
-          r.height > 18
-        );
-      };
-      const uniq = (arr) => [...new Set(arr.map(clean).filter(Boolean))];
-      const main = document.querySelector("main") || document.body;
+  return page.evaluate(({ expectedHeading }) => {
+    const clean = (s) => s?.replace(/\s+/g, " ").trim() || "";
+    const norm = (s) => clean(s).toLowerCase();
 
-      let root = null;
-      const wanted = clean(expectedHeading).toLowerCase();
+    const visible = (el) => {
+      if (!el) return false;
+      const st = window.getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return st.display !== "none" && st.visibility !== "hidden" && r.width > 40 && r.height > 18;
+    };
 
+    const uniq = (arr) => [...new Set(arr.map(clean).filter(Boolean))];
+    const main = document.querySelector("main") || document.body;
+    const wanted = norm(expectedHeading);
+
+    let root = null;
+
+    const hasTabs = !!main.querySelector('[role="tab"]');
+
+    if (hasTabs) {
       const anchors = Array.from(
-        main.querySelectorAll('h1,h2,h3,[role="heading"],[dir="auto"]'),
+        main.querySelectorAll("h1,h2,h3,[role='heading'],[dir='auto']")
       ).filter(visible);
+
       for (const anchor of anchors) {
-        const text = clean(anchor.textContent).toLowerCase();
+        const text = norm(anchor.textContent);
         if (!text || (wanted && !text.includes(wanted))) continue;
 
         let cur = anchor.parentElement;
         for (let i = 0; i < 8 && cur; i++) {
-          const textNodes = Array.from(
-            cur.querySelectorAll('[dir="auto"], p, li'),
-          ).filter(visible);
-          const mediaNodes = Array.from(
-            cur.querySelectorAll("iframe, img, canvas, svg"),
-          ).filter(visible);
+          const textNodes = Array.from(cur.querySelectorAll("[dir='auto'], p, li")).filter(visible);
+          const mediaNodes = Array.from(cur.querySelectorAll("iframe, img, canvas, svg, mux-player, video")).filter(visible);
+
           if (textNodes.length >= 2 || mediaNodes.length >= 1) {
             root = cur;
             break;
@@ -705,26 +764,61 @@ async function extractCurrentPanel(page, expectedHeading) {
         }
         if (root) break;
       }
+    }
 
-      if (!root) root = main;
+    if (!root) {
+      const media =
+        main.querySelector("mux-player") ||
+        main.querySelector("video") ||
+        main.querySelector("iframe");
 
-      const descriptions = uniq(
-        Array.from(root.querySelectorAll('[dir="auto"], p, li'))
-          .filter(visible)
-          .map((el) => clean(el.textContent))
-          .filter((t) => t.length > 10),
-      );
+      if (media) {
+        let cur = media.parentElement;
+        for (let i = 0; i < 10 && cur; i++) {
+          const textNodes = Array.from(cur.querySelectorAll("[dir='auto'], p, li")).filter(visible);
+          const imageNodes = Array.from(cur.querySelectorAll("img")).filter(visible);
 
-      const htmlBlocks = Array.from(
-        root.querySelectorAll('img, h1, h2, h3, p, li, [dir="auto"]'),
-      )
-        .filter(visible)
-        .map((el) => el.outerHTML);
+          if (textNodes.length >= 3 || imageNodes.length >= 1) {
+            root = cur;
+            break;
+          }
+          cur = cur.parentElement;
+        }
+      }
+    }
 
-      return { descriptions, htmlBlocks };
-    },
-    { expectedHeading },
-  );
+    if (!root) root = main;
+
+    const commentsHeading = Array.from(
+      root.querySelectorAll("h1,h2,h3,[role='heading'],[dir='auto']")
+    ).find((el) => visible(el) && norm(el.textContent) === "comments");
+
+    const shouldKeep = (el) => {
+      if (!visible(el)) return false;
+      if (!commentsHeading) return true;
+
+      const a = el.getBoundingClientRect();
+      const b = commentsHeading.getBoundingClientRect();
+
+      return a.top < b.top - 10;
+    };
+
+    const descriptions = uniq(
+      Array.from(root.querySelectorAll("[dir='auto'], p, li"))
+        .filter(shouldKeep)
+        .map((el) => clean(el.textContent))
+        .filter((t) => t.length > 10)
+        .filter((t) => norm(t) !== "comments")
+    );
+
+    const htmlBlocks = Array.from(
+      root.querySelectorAll("mux-player, video, iframe, img, h1, h2, h3, p, li, [dir='auto']")
+    )
+      .filter(shouldKeep)
+      .map((el) => el.outerHTML);
+
+    return { descriptions, htmlBlocks };
+  }, { expectedHeading });
 }
 
 async function captureNotationScreenshots(page, outDir, prefix) {
