@@ -54,13 +54,6 @@ npm install
 npx playwright install chromium
 ```
 
-On Windows, if PowerShell blocks `npm` or `npx`, use:
-
-```powershell
-npm.cmd install
-npx.cmd playwright install chromium
-```
-
 ---
 
 ## Environment variables
@@ -170,41 +163,6 @@ The scraper writes `output/course.json` incrementally, and the video downloader 
 
 ---
 
-## Scraping only a specific grade or day
-
-You can filter scraping with environment variables.
-
-### PowerShell
-
-```powershell
-$env:SCRAPE_GRADE='Grade 5'
-npm.cmd run scrape
-```
-
-Specific day inside a grade:
-
-```powershell
-$env:SCRAPE_GRADE='Grade 5'
-$env:SCRAPE_DAY='Day 3'
-npm.cmd run scrape
-```
-
-Clear filters:
-
-```powershell
-Remove-Item Env:SCRAPE_GRADE -ErrorAction SilentlyContinue
-Remove-Item Env:SCRAPE_DAY -ErrorAction SilentlyContinue
-```
-
-### Bash
-
-```bash
-SCRAPE_GRADE='Grade 5' npm run scrape
-SCRAPE_GRADE='Grade 5' SCRAPE_DAY='Day 3' npm run scrape
-```
-
----
-
 ## Grade-only wrapper
 
 A small wrapper can be used to avoid setting env vars manually:
@@ -213,8 +171,6 @@ A small wrapper can be used to avoid setting env vars manually:
 node src/run-grade-scrape.js --grade "Grade 5"
 node src/run-grade-scrape.js --grade "Grade 5" --day "Day 3"
 ```
-
-This simply sets `SCRAPE_GRADE` and `SCRAPE_DAY` before calling the main scraper.
 
 ---
 
@@ -243,20 +199,6 @@ Instead, for each lesson tab it:
 9. rejects broken or too-short files
 
 The downloader is intentionally conservative and prefers retry-safe behavior over speed.
-
----
-
-## File naming
-
-Video files are saved as:
-
-- `video-lesson.mp4`
-- `video-exercise-1.mp4`
-- `video-exercise-2.mp4`
-- `video-exercise-3.mp4`
-- `video-jam.mp4`
-
-Workout lessons often contain only the lesson video and no separate exercise tabs.
 
 ---
 
@@ -327,23 +269,3 @@ Get-ChildItem -Recurse -Filter *.mp4 | ForEach-Object {
 ## Adapting the scraper to another Pickup Music learning pathway
 
 In most cases, no code changes are needed. Just change the .env link, title and get rid of previous output files.
-
----
-
-## Project structure
-
-```text
-src/
-  auth.js                  # login + storageState handling
-  index.js                 # CLI entrypoint
-  scraper.js               # course scraping + markdown/html export
-  video-downloader.js      # real media URL capture + ffmpeg download
-  soundslice.js            # helper logic related to notation / Soundslice
-  utils.js                 # logging, slugs, output paths
-  run-grade-scrape.js      # optional wrapper for grade/day filtering
-
-output/
-  storage.json             # authenticated session
-  course.json              # scraped course structure
-  lessons/                 # per-grade / per-lesson exports and videos
-```
