@@ -73,8 +73,8 @@ Example:
 BASE_URL=https://my.pickupmusic.com
 PICKUP_EMAIL=your@email.com
 PICKUP_PASSWORD=your_password
-COURSE_TITLE=CAGED Learning Pathway
-COURSE_PATH=/guitar/class/fec2ad29-816b-4950-8809-af635a0685c3/grade/587062e8-5e50-43a5-85d1-f2fa4398e858
+COURSE_TITLE=X Learning Pathway
+COURSE_PATH=/guitar/class/<class-id>/grade/<grade-id>
 CONCURRENCY=1
 ```
 
@@ -113,22 +113,10 @@ Logs into Pickup Music and saves browser state to `output/storage.json`.
 npm run auth
 ```
 
-or directly:
-
-```bash
-node src/index.js --auth-only
-```
-
 ### Scrape lesson structure and content
 
 ```bash
 npm run scrape
-```
-
-or directly:
-
-```bash
-node src/index.js --scrape-only
 ```
 
 This creates or updates:
@@ -143,24 +131,12 @@ This creates or updates:
 npm run videos
 ```
 
-or directly:
-
-```bash
-node src/index.js --videos-only
-```
-
 This requires `output/course.json` from the scrape step.
 
 ### Full pipeline
 
 ```bash
 npm run full
-```
-
-or directly:
-
-```bash
-node src/index.js --full
 ```
 
 This runs:
@@ -284,27 +260,6 @@ Workout lessons often contain only the lesson video and no separate exercise tab
 
 ---
 
-## Windows notes
-
-If `npm` / `npx` fail because PowerShell blocks scripts:
-
-```powershell
-npm.cmd run auth
-npm.cmd run scrape
-npm.cmd run videos
-```
-
-If you want to run the entrypoint directly:
-
-```powershell
-node src/index.js --auth-only
-node src/index.js --scrape-only
-node src/index.js --videos-only
-node src/index.js --full
-```
-
----
-
 ## Troubleshooting
 
 ### `Brak output/course.json. Najpierw odpal npm.cmd run scrape`
@@ -371,30 +326,7 @@ Get-ChildItem -Recurse -Filter *.mp4 | ForEach-Object {
 
 ## Adapting the scraper to another Pickup Music learning pathway
 
-In most cases, no code changes are needed.
-
-Update only the `.env` values:
-
-```env
-BASE_URL=https://my.pickupmusic.com
-COURSE_TITLE=Another Learning Pathway
-COURSE_PATH=/guitar/class/<class-id>/grade/<grade-id>
-CONCURRENCY=1
-```
-
-Then run:
-
-```bash
-npm run scrape
-npm run videos
-```
-
-This works when the new course still uses the same Pickup Music learning pathway UI:
-
-- `Class overview`
-- grade/day hierarchy
-- tab-based lesson pages
-- in-page video player
+In most cases, no code changes are needed. Just change the .env link, title and get rid of previous output files.
 
 ---
 
@@ -414,22 +346,4 @@ output/
   storage.json             # authenticated session
   course.json              # scraped course structure
   lessons/                 # per-grade / per-lesson exports and videos
-```
-
----
-
-## Security
-
-Do not commit:
-
-- `.env`
-- `output/storage.json`
-- downloaded course assets, unless you explicitly want them versioned
-
-A basic `.gitignore` should include at least:
-
-```gitignore
-node_modules/
-.env
-output/
 ```
