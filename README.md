@@ -204,6 +204,10 @@ The downloader is intentionally conservative and prefers retry-safe behavior ove
 
 ## Troubleshooting
 
+### `Scraper can't download past 1st grade`
+
+If this happens, consider manually helping the scraper once it's done with the grade, open the specific grade tab and from then it should automatically scrape all the content from the grade. If it doesn't try to click on day 1 or specify SCRAPE_DAY/SCRAPE_GRADE in .env
+
 ### `Brak output/course.json. Najpierw odpal npm.cmd run scrape`
 
 Run the scrape step first:
