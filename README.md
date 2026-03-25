@@ -8,7 +8,7 @@ The project does three things:
 2. scrapes the course structure and lesson content,
 3. downloads lesson and exercise videos from the real player media URLs.
 
-It is designed for courses that follow the same UI model as Pickup Music learning pathways:
+It is designed for courses/playlists for Pickup Music learning pathways:
 
 - **Class overview**
 - **Grade 1, Grade 2, ...**
@@ -160,45 +160,6 @@ npm run videos
 ```
 
 The scraper writes `output/course.json` incrementally, and the video downloader is built to skip files that already exist and look valid.
-
----
-
-## Grade-only wrapper
-
-A small wrapper can be used to avoid setting env vars manually:
-
-```bash
-node src/run-grade-scrape.js --grade "Grade 5"
-node src/run-grade-scrape.js --grade "Grade 5" --day "Day 3"
-```
-
----
-
-## How video downloading works
-
-The downloader does **not** rely on static URLs stored in the lesson export.
-
-Instead, for each lesson tab it:
-
-1. opens the lesson page,
-2. finds lesson / exercise / jam tabs,
-3. opens the tab,
-4. waits for the player,
-5. starts playback,
-6. collects candidate media URLs from:
-   - `video.currentSrc`
-   - player/network responses
-   - `performance.getEntriesByType('resource')`
-7. filters out junk such as:
-   - Sentry
-   - PostHog
-   - fonts
-   - JS/CSS assets
-   - analytics endpoints
-8. downloads the selected media with `ffmpeg`
-9. rejects broken or too-short files
-
-The downloader is intentionally conservative and prefers retry-safe behavior over speed.
 
 ---
 

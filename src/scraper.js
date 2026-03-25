@@ -30,6 +30,26 @@ function upsertGrade(course, gradeOut) {
   }
 }
 
+function isGradedLessonUrl(url = '') {
+  return /\/class\/[^/]+\/grade\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url);
+}
+
+function isPlaylistLessonUrl(url = '') {
+  return /\/class\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url);
+}
+
+function isAnyLessonUrl(url = '') {
+  return isGradedLessonUrl(url) || isPlaylistLessonUrl(url);
+}
+
+function isGradedOverviewUrl(url = '') {
+  return /\/class\/[^/]+\/grade\/[^/]+$/.test(url);
+}
+
+function isPlaylistOverviewUrl(url = '') {
+  return /\/class\/[^/]+$/.test(url);
+}
+
 export async function scrapeCourse() {
   const browser = await chromium.launch({
     headless: false,
@@ -43,17 +63,21 @@ export async function scrapeCourse() {
   try {
     await fs.ensureDir("./output");
     await gotoCourseOverview(page);
+                const courseKind = await detectCourseKind(page);
+            log('ℹ️', `Wykryty typ kursu: ${courseKind}`);
 
+    const course = {
+    title: process.env.COURSE_TITLE || 'Pickup Music Course',
+    scrapedAt: new Date().toISOString(),
+    kind: courseKind,
+    grades: []
+  };
+
+  if (courseKind === 'pathway') {
     const grades = await extractGradeStructure(page);
-    log("✅", `Znaleziono ${grades.length} gradów`);
+    log('✅', `Znaleziono ${grades.length} gradów`);
 
-    const course = (await fs.pathExists("./output/course.json"))
-      ? await fs.readJson("./output/course.json")
-      : {
-          title: process.env.COURSE_TITLE || "Learning Pathway",
-          scrapedAt: new Date().toISOString(),
-          grades: [],
-        };
+  // zostawiasz tutaj swój dotychczasowy kod pathway 1:1
 
     course.title =
       process.env.COURSE_TITLE || course.title || "Learning Pathway";
@@ -231,6 +255,138 @@ export async function scrapeCourse() {
       await saveCourseSnapshot(course);
       await delay(1200);
     }
+  } else if (courseKind === 'playlist') {
+  const playlist = await extractPlaylistStructure(page);
+  log('✅', `Znaleziono ${playlist.lessons.length} dni w playliście`);
+
+  const pseudoGrade = {
+    gradeNum: 'Playlist',
+    gradeTitle: playlist.title || course.title,
+    gradeSlug: 'playlist',
+    typeLabel: playlist.typeLabel || 'Challenge',
+    performances: playlist.performances || [],
+    lessons: []
+  };
+
+  for (const lesson of playlist.lessons) {
+    const lessonFilterText = normalizeText(`${lesson.day} ${lesson.title}`);
+    if (SCRAPE_DAY_FILTER && !lessonFilterText.includes(SCRAPE_DAY_FILTER)) {
+      continue;
+    }
+
+    const lessonSlug = toSlug(`${lesson.day}-${lesson.title}`);
+    const outDir = lessonOutputDir('playlist', lessonSlug);
+    await fs.ensureDir(outDir);
+    await cleanupLessonDir(outDir);
+
+    log('  📝', `${lesson.day}: ${lesson.title}`);
+
+    try {
+      await gotoCourseOverview(page);
+      await openPlaylistLessonFromSidebar(page, lesson);
+      await waitForLessonStable(page, lesson);
+
+      const validation = await validateLessonView(page, lesson);
+      if (!validation.accepted) {
+        throw new Error(`Widok nie zgadza się z playlist lesson: ${JSON.stringify(validation)}`);
+      }
+
+      const url = page.url();
+      log('  🔗', url);
+
+      await resetLessonViewport(page);
+      const notationPdf = await downloadLessonNotationPdf(page, outDir);
+
+      await resetLessonViewport(page);
+      const header = await extractPageHeader(page);
+      const menuOptions = await extractHeaderMenuOptions(page);
+      const tabs = await getTopTabs(page);
+
+      await activateTopTab(page, 'Lesson').catch(() => {});
+      const lessonUnit = await extractLessonPanel(page, outDir, 'lesson');
+      const exerciseUnits = await extractExercisePanels(page, outDir);
+
+      const markdown = buildLessonMarkdown({
+        grade: { gradeNum: 'Playlist', gradeTitle: playlist.title || course.title },
+        lesson,
+        url,
+        notationPdf,
+        lessonUnit,
+        exerciseUnits,
+      });
+
+      const html = buildLessonHtml({
+        grade: { gradeNum: 'Playlist', gradeTitle: playlist.title || course.title },
+        lesson,
+        url,
+        notationPdf,
+        lessonUnit,
+        exerciseUnits,
+      });
+
+      const meta = {
+        kind: 'playlist',
+        playlistTitle: playlist.title || course.title,
+        typeLabel: playlist.typeLabel || 'Challenge',
+        day: lesson.day,
+        title: lesson.title,
+        ariaLabel: lesson.ariaLabel || null,
+        slug: lessonSlug,
+        outputDir: outDir,
+        url,
+        notationPdf: notationPdf || null,
+        validation,
+        header,
+        menuOptions,
+        tabs,
+        lessonUnit,
+        exerciseUnits,
+      };
+
+      await fs.writeJson(path.join(outDir, 'meta.json'), meta, { spaces: 2 });
+      await fs.writeFile(path.join(outDir, 'lesson.md'), markdown, 'utf8');
+      await fs.writeFile(path.join(outDir, 'lesson.html'), html, 'utf8');
+
+      pseudoGrade.lessons.push({
+        day: lesson.day,
+        title: lesson.title,
+        slug: lessonSlug,
+        url,
+        outputDir: outDir,
+        notationPdf: notationPdf || null,
+        units: [lessonUnit, ...exerciseUnits].filter(Boolean).map((u) => ({
+          label: u.label || null,
+          heading: u.heading || null,
+          subtitle: u.subtitle || null,
+          url,
+          notationShots: u.notationShots || [],
+        })),
+      });
+    } catch (err) {
+      log('  ❌', `Błąd: ${err.message}`);
+
+      const failed = {
+        kind: 'playlist',
+        day: lesson.day,
+        title: lesson.title,
+        slug: lessonSlug,
+        outputDir: outDir,
+        error: err.message,
+      };
+
+      await fs.writeJson(path.join(outDir, 'meta.json'), failed, { spaces: 2 });
+      pseudoGrade.lessons.push(failed);
+    }
+
+    await saveCourseSnapshot({ ...course, grades: [...course.grades, pseudoGrade] });
+    await delay();
+  }
+
+  course.grades.push(pseudoGrade);
+}
+else {
+  throw new Error('Nie udało się rozpoznać typu kursu.');
+}
 
     await fs.writeJson("./output/course.json", course, { spaces: 2 });
     log("💾", "Zapisano → output/course.json");
@@ -259,12 +415,67 @@ function wireBrowserLogs(page) {
     const ignore =
       url.includes("sentry.io") ||
       url.includes("/avatar.png?token=") ||
+      url.includes("/api/functions/v1/playlists?") ||
       (status === 404 && url === BASE_COURSE_URL);
 
     if (status >= 400 && !ignore) {
       log("🟠", `${status} ${url.slice(0, 180)}`);
     }
   });
+}
+
+async function waitForCourseShell(page) {
+  await page.waitForFunction(
+    () => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const hasMain = !!document.querySelector("main");
+      const hasOverviewButton = !!document.querySelector(
+        'button[aria-label="Class overview"]',
+      );
+      const hasGradeAccordion = !!document.querySelector('[role="menuitem"]');
+      const hasLessonButtons = Array.from(
+        document.querySelectorAll('button[aria-label]'),
+      ).some((btn) => /day \d+/i.test(clean(btn.innerText || btn.textContent || "")));
+      const text = clean(document.body?.innerText || "");
+      const hasPlaylistOverview = text.includes('Lessons') && /Day 1/i.test(text);
+      const hasPathwayHeading = Array.from(
+        document.querySelectorAll('h1,[role="heading"],[dir="auto"]'),
+      ).some((el) => /^Grade \d+$/i.test(clean(el.textContent || "")));
+
+      return (
+        hasMain &&
+        (hasOverviewButton || hasGradeAccordion || hasLessonButtons || hasPlaylistOverview || hasPathwayHeading)
+      );
+    },
+    { timeout: 30000 },
+  );
+
+  await page.waitForTimeout(1500);
+}
+
+async function waitForOverviewReady(page) {
+  await page.waitForFunction(
+    () => {
+      const clean = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const url = location.href;
+      const urlOk =
+        /\/class\/[^/]+$/.test(url) ||
+        /\/class\/[^/]+\/overview$/.test(url) ||
+        /\/class\/[^/]+\/grade\/[^/]+$/.test(url) ||
+        /\/class\/[^/]+\/grade\/[^/]+\/overview$/.test(url);
+
+      const lessonButtons = Array.from(
+        document.querySelectorAll('button[aria-label]'),
+      ).filter((btn) => /day \d+/i.test(clean(btn.innerText || btn.textContent || "")));
+
+      const hasGradeAccordion = !!document.querySelector('[role="menuitem"]');
+      const hasLessonList = lessonButtons.length > 0;
+      return urlOk && (hasGradeAccordion || hasLessonList);
+    },
+    { timeout: 20000 },
+  ).catch(() => {});
+
+  await page.waitForTimeout(800);
 }
 
 async function gotoCourseOverview(page) {
@@ -274,19 +485,59 @@ async function gotoCourseOverview(page) {
     timeout: 60000,
   });
 
-  await page.waitForFunction(
-    () => !!document.querySelector('[role="menuitem"]'),
-    { timeout: 30000 },
-  );
-  await page.waitForTimeout(1500);
+  await waitForCourseShell(page);
 
   const overviewButton = page
     .locator('button[aria-label="Class overview"]')
     .first();
+
   if (await overviewButton.count()) {
     await overviewButton.click({ force: true }).catch(() => {});
     await page.waitForTimeout(1000);
   }
+
+  await waitForOverviewReady(page);
+}
+
+async function extractPageHeader(page) {
+  return page.evaluate(() => {
+    const clean = (s) => s?.replace(/\s+/g, ' ').trim() || null;
+    const headings = Array.from(
+      document.querySelectorAll('main h1, main h2, main h3, main [role="heading"]')
+    )
+      .map((el) => clean(el.textContent))
+      .filter(Boolean);
+
+    return {
+      gradeHeading: headings.find((t) => /^Grade \d+\./.test(t)) || null,
+      lessonHeading: headings.find((t) => /^Day \d+\./.test(t)) || null,
+      pageHeading: headings[0] || null
+    };
+  });
+}
+
+async function detectCourseKind(page) {
+  return page.evaluate(() => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
+    const allText = clean(document.body?.innerText || '');
+
+    const hasGrades = Array.from(document.querySelectorAll('h1,[role="heading"],div[dir="auto"]'))
+      .map((el) => clean(el.textContent))
+      .some((t) => /^Grade \d+$/i.test(t));
+
+    if (hasGrades) return 'pathway';
+
+    const hasChallengeBadge = Array.from(document.querySelectorAll('[dir="auto"], h1, h2, h3'))
+      .map((el) => clean(el.textContent))
+      .some((t) => t === 'Challenge');
+
+    const hasLessonsList = /Lessons/.test(allText) && /Day 1/.test(allText);
+
+    if (hasChallengeBadge || hasLessonsList) return 'playlist';
+
+    return 'unknown';
+  });
 }
 
 async function extractGradeStructure(page) {
@@ -342,6 +593,241 @@ async function extractGradeStructure(page) {
 
     return grades;
   });
+}
+
+async function extractPlaylistStructure(page) {
+  return page.evaluate(() => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
+    const title =
+      Array.from(document.querySelectorAll('h1,[role="heading"]'))
+        .map((el) => clean(el.textContent))
+        .find(
+          (t) =>
+            t &&
+            t !== 'Class overview' &&
+            t !== 'Lessons' &&
+            t !== 'Performances' &&
+            t !== 'Challenge' &&
+            t !== 'Playlist' &&
+            !/^Day \d+/i.test(t),
+        ) || null;
+
+    const typeLabel =
+      Array.from(document.querySelectorAll('[dir="auto"], h1, h2, h3'))
+        .map((el) => clean(el.textContent))
+        .find((t) => t === 'Challenge' || t === 'Playlist') ||
+      null;
+
+    const buttons = Array.from(document.querySelectorAll('button[aria-label]'));
+    const lessons = [];
+    const performances = [];
+    const seenLessons = new Set();
+    const seenPerf = new Set();
+
+    for (const btn of buttons) {
+      const aria = clean(btn.getAttribute('aria-label'));
+      const texts = Array.from(btn.querySelectorAll('[dir="auto"], h1, h2, h3'))
+        .map((el) => clean(el.textContent))
+        .filter(Boolean);
+
+      const day = texts.find((t) => /^Day \d+$/i.test(t));
+      const itemTitle = texts.find((t) => t !== day);
+
+      if (day && itemTitle) {
+        const key = `${day}__${itemTitle}`;
+        if (!seenLessons.has(key)) {
+          seenLessons.add(key);
+          lessons.push({
+            day,
+            title: itemTitle,
+            ariaLabel: aria || itemTitle,
+          });
+        }
+        continue;
+      }
+
+      if (texts.length >= 2) {
+        const perfName = texts[0];
+        const artist = texts[1];
+        const ignored = [
+          'Lessons',
+          'Performances',
+          'Class overview',
+          'Start class',
+          'Complete class',
+          'Challenge',
+          'Playlist',
+        ];
+
+        if (!ignored.includes(perfName) && !ignored.includes(artist)) {
+          const key = `${perfName}__${artist}`;
+          if (!seenPerf.has(key)) {
+            seenPerf.add(key);
+            performances.push({
+              title: perfName,
+              artist,
+              ariaLabel: aria || perfName,
+            });
+          }
+        }
+      }
+    }
+
+    return {
+      title,
+      typeLabel,
+      lessons,
+      performances,
+    };
+  });
+}
+
+
+async function waitForLessonStable(page, lesson = null) {
+  await waitForLessonShell(page);
+
+  await page.waitForFunction(
+    ({ day, title }) => {
+      const normalize = (s = '') => s.replace(/\s+/g, ' ').trim().toLowerCase();
+      const text = normalize(document.body?.innerText || '');
+      const url = location.href;
+      const urlOk =
+        /\/class\/[^/]+\/grade\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url) ||
+        /\/class\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url);
+      const hasPlayer =
+        !!document.querySelector('main mux-player') ||
+        !!document.querySelector('main video') ||
+        !!document.querySelector('main iframe[src*="soundslice"]') ||
+        !!document.querySelector('main [src*=".m3u8"]');
+      const hasTabs = !!document.querySelector('[role="tab"]');
+      const hasUi =
+        hasPlayer ||
+        hasTabs ||
+        text.includes('complete lesson') ||
+        text.includes('complete class') ||
+        text.includes('start class');
+      const hasDay = !!day && text.includes(normalize(String(day)));
+      const hasTitle = !!title && text.includes(normalize(String(title)));
+      return urlOk && hasUi && (!day && !title ? true : hasDay || hasTitle);
+    },
+    lesson || {},
+    { timeout: 25000 },
+  ).catch(() => {});
+
+  await page.waitForTimeout(1200);
+}
+
+async function activateTopTab(page, tabLabel) {
+  const wanted = normalizeText(tabLabel || '');
+  const tabs = await getTopTabs(page);
+  const tab = tabs.find((t) => normalizeText(t.label || t.heading || '') === wanted);
+
+  if (!tab) return false;
+  if (!tab.synthetic) {
+    await openTab(page, tab.index);
+    await waitForPanelStable(page, tab.label || tab.heading || tabLabel || 'tab');
+  } else {
+    await resetLessonViewport(page);
+    await page.waitForTimeout(500);
+  }
+
+  return true;
+}
+
+async function extractLessonPanel(page, outDir, prefix = 'lesson') {
+  const tabs = await getTopTabs(page).catch(() => []);
+  const lessonTab = tabs.find((t) => normalizeText(t.label || t.heading || '') === 'lesson') || tabs[0] || null;
+
+  if (lessonTab && !lessonTab.synthetic) {
+    await openTab(page, lessonTab.index);
+    await waitForPanelStable(page, lessonTab.label || lessonTab.heading || 'Lesson');
+  } else {
+    await resetLessonViewport(page);
+  }
+
+  const panel = await extractCurrentPanel(page, lessonTab?.label || lessonTab?.heading || 'Lesson');
+  const notationShots = await captureNotationScreenshotsForCurrentView(
+    page,
+    outDir,
+    toSlug(prefix || lessonTab?.label || lessonTab?.heading || 'lesson'),
+  );
+
+  return {
+    label: lessonTab?.label || 'Lesson',
+    heading: lessonTab?.heading || 'Lesson',
+    subtitle: lessonTab?.subtitle || null,
+    descriptions: panel.descriptions || [],
+    htmlBlocks: panel.htmlBlocks || [],
+    notationShots,
+  };
+}
+
+async function captureNotationScreenshotsForCurrentView(page, outDir, prefix = 'lesson') {
+  await resetLessonViewport(page);
+  return captureNotationScreenshots(page, outDir, prefix);
+}
+
+async function extractExercisePanels(page, outDir) {
+  const tabs = await getTopTabs(page).catch(() => []);
+  const exerciseTabs = tabs.filter(
+    (t) => !t.disabled && normalizeText(t.label || t.heading || '') !== 'lesson',
+  );
+
+  const units = [];
+  for (const tab of exerciseTabs) {
+    if (!tab.synthetic) {
+      await openTab(page, tab.index);
+      await waitForPanelStable(page, tab.label || tab.heading || 'Exercise');
+    } else {
+      await resetLessonViewport(page);
+      await page.waitForTimeout(500);
+    }
+
+    const panel = await extractCurrentPanel(page, tab.label || tab.heading || 'Exercise');
+    const notationShots = await captureNotationScreenshotsForCurrentView(
+      page,
+      outDir,
+      toSlug(tab.label || tab.heading || 'exercise'),
+    );
+
+    units.push({
+      label: tab.label || null,
+      heading: tab.heading || null,
+      subtitle: tab.subtitle || null,
+      descriptions: panel.descriptions || [],
+      htmlBlocks: panel.htmlBlocks || [],
+      notationShots,
+    });
+  }
+
+  return units;
+}
+
+async function extractHeaderMenuOptions(page) {
+  const opened = await openLessonOptionsMenu(page).catch(() => false);
+  if (!opened) return [];
+
+  const options = await page.evaluate(() => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const st = window.getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      return st.display !== 'none' && st.visibility !== 'hidden' && r.width > 20 && r.height > 12;
+    };
+
+    return Array.from(document.querySelectorAll('[role="menuitem"], [role="option"], button, a, div'))
+      .filter(visible)
+      .map((el) => clean(el.textContent || el.getAttribute('aria-label') || ''))
+      .filter(Boolean)
+      .filter((text) => /download|notation|pdf/i.test(text))
+      .slice(0, 10);
+  }).catch(() => []);
+
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(300);
+  return [...new Set(options)];
 }
 
 async function openExactLesson(page, grade, lesson) {
@@ -526,43 +1012,35 @@ async function clickLessonInGrade(
 
 async function validateLessonView(page, lesson) {
   return page.evaluate(({ day, title }) => {
-    const norm = (s = "") => s.replace(/\s+/g, " ").trim().toLowerCase();
+    const normalize = (s = '') => s.replace(/\s+/g, ' ').trim().toLowerCase();
 
-    const main = document.querySelector("main");
-    const mainText = norm(main?.innerText || "");
+    const pageText = normalize(document.body?.innerText || '');
     const url = location.href;
 
-    const urlOk = /\/lesson\/[^/]+/.test(url);
-    const hasDay = mainText.includes(norm(day));
-    const hasTitle = mainText.includes(norm(title));
+    const urlOk =
+      /\/class\/[^/]+\/grade\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url) ||
+      /\/class\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url);
 
-    const hasClassicTabs = !!document.querySelector('[role="tab"]');
-    const hasVideoLikeUi =
-      !!document.querySelector("main video") ||
-      !!document.querySelector("main iframe") ||
-      !!document.querySelector("main mux-player") ||
-      !!document.querySelector('main [src*=".m3u8"]');
+    const hasDay = !!day && pageText.includes(normalize(day || ''));
+    const hasTitle = !!title && pageText.includes(normalize(title || ''));
 
-    const hasLessonActions =
-      !!Array.from(document.querySelectorAll("main button, main [role='button']")).find((el) => {
-        const txt = norm(el.textContent || "");
-        const aria = norm(el.getAttribute("aria-label") || "");
-        return (
-          txt.includes("complete lesson") ||
-          aria.includes("complete lesson") ||
-          txt.includes("performances") ||
-          aria.includes("performances")
-        );
-      });
-
-    const hasUi = hasClassicTabs || hasVideoLikeUi || hasLessonActions;
+    const hasUi =
+      !!document.querySelector('[role="tab"]') ||
+      !!document.querySelector('main iframe[src*="soundslice"]') ||
+      !!document.querySelector('main video') ||
+      !!document.querySelector('main mux-player') ||
+      !!document.querySelector('main [src*=".m3u8"]') ||
+      pageText.includes('complete lesson') ||
+      pageText.includes('performances') ||
+      pageText.includes('start class') ||
+      pageText.includes('complete class');
 
     return {
       urlOk,
       hasDay,
       hasTitle,
       hasUi,
-      accepted: urlOk && hasDay && hasTitle && hasUi,
+      accepted: urlOk && hasUi && (!day && !title ? true : hasDay || hasTitle),
     };
   }, lesson);
 }
@@ -1058,6 +1536,76 @@ async function openLessonOptionsMenu(page) {
     .first()
     .isVisible()
     .catch(() => false);
+}
+
+async function openPlaylistLessonFromSidebar(page, lesson) {
+  const target = await page.evaluate(({ lesson }) => {
+    const clean = (s) => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const lessonDay = clean(lesson?.day || '');
+    const lessonTitle = clean(lesson?.title || lesson || '');
+    const lessonAria = clean(lesson?.ariaLabel || '');
+
+    const buttons = Array.from(document.querySelectorAll('button[aria-label]'));
+
+    const scored = buttons
+      .map((btn, index) => {
+        const aria = clean(btn.getAttribute('aria-label'));
+        const text = clean(btn.innerText || btn.textContent || '');
+        const combined = `${aria} ${text}`;
+        let score = 0;
+        if (lessonAria && (aria === lessonAria || text === lessonAria)) score += 100;
+        if (lessonDay && combined.includes(lessonDay)) score += 30;
+        if (lessonTitle && combined.includes(lessonTitle)) score += 60;
+        if (lessonDay && lessonTitle && combined.includes(lessonDay) && combined.includes(lessonTitle)) score += 50;
+        return { index, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+    return scored.find((item) => item.score > 0) || null;
+  }, { lesson });
+
+  if (!target) {
+    throw new Error(`Brak skutecznego kliknięcia playlist lesson: ${lesson?.day || ''} ${lesson?.title || lesson}`);
+  }
+
+  const locator = page.locator('button[aria-label]').nth(target.index);
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await locator.click({ force: true, timeout: 5000 }).catch(async () => {
+    await page.evaluate(({ index }) => {
+      const btn = Array.from(document.querySelectorAll('button[aria-label]'))[index];
+      btn?.scrollIntoView({ block: 'center' });
+      btn?.click();
+    }, target);
+  });
+
+  await waitForLessonShell(page);
+  await page.waitForTimeout(1200);
+
+  const currentUrl = page.url();
+  if (!isAnyLessonUrl(currentUrl)) {
+    throw new Error(`Nie otwarto poprawnego lesson URL dla: ${lesson?.title || lesson}`);
+  }
+}
+
+async function waitForLessonShell(page) {
+  await page.waitForFunction(() => {
+    const url = location.href;
+    const urlOk =
+      /\/class\/[^/]+\/grade\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url) ||
+      /\/class\/[^/]+\/lesson\/[^/]+(?:\/item\/[^/]+)?$/.test(url);
+
+    const hasMain = !!document.querySelector('main');
+    const hasAnyPlayer =
+      !!document.querySelector('iframe[src*="soundslice"]') ||
+      !!document.querySelector('video') ||
+      !!document.querySelector('mux-player') ||
+      !!document.querySelector('[src*=".m3u8"]');
+
+    return hasMain && (urlOk || hasAnyPlayer);
+  }, { timeout: 25000 });
+
+  await page.waitForTimeout(1500);
+  return true;
 }
 
 async function findTopRightMenuButton(page) {
